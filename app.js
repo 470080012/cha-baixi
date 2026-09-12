@@ -5,6 +5,8 @@
   const escapeHTML=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const icon=name=>`<svg aria-hidden="true"><use href="#i-${name}"/></svg>`;
   const STORAGE='tea-art-collection-v1';
+  const DRAFT='tea-art-draft-v1',WHISK_TAP=40;
+  let draftTimer=0,draftWarningShown=false;
   const state={stage:0,maxStage:0,bowl:0,tea:0,water:0,pourStep:0,pourReady:false,pourFailed:false,whisk:0,objects:[],selected:null,brush:'fine',mode:'brush',panel:'elements',category:'萌宠',galleryMode:'whole',customColor:false,textDirection:'horizontal',textDraft:'',finishTab:'title',color:'#745235',title:'一盏清欢',inscription:'',stamp:'none',stampText:'清欢'};
   const initialState=JSON.stringify(state);
   let hasStarted=false,sessionComplete=false,modalScroll=0;
@@ -13,8 +15,31 @@
   const pointers=new Map();let gesture=null;
   const renderer=new TeaRenderer($('tea-canvas'),state);renderer.assetsReady.then(()=>{if(state.stage===4&&hasStarted)renderDrawing();});
 
-  function showLanding(){stopInteractions();document.body.classList.add('is-landing');document.body.classList.remove('is-editor');document.body.classList.remove('is-liquid');$('landing').hidden=false;$('experience').hidden=true;$('back-button').disabled=false;$('start-label').textContent=sessionComplete?'再点一盏':hasStarted?'继续点茶':'点击开始';$('new-session').hidden=!hasStarted||sessionComplete;window.scrollTo(0,0);}
-  function enterExperience(){window.TeaSound.start();hasStarted=true;document.body.classList.remove('is-landing');$('landing').hidden=true;$('experience').hidden=false;render();$('experience').scrollTop=0;renderer.invalidate(true);window.scrollTo(0,0);}
+  // Save stable state during interaction, and flush synchronously when leaving the page.
+  function saveDraft(){
+    clearTimeout(draftTimer);draftTimer=0;if(!hasStarted)return;
+    try{
+      const saved=JSON.parse(JSON.stringify(state));saved.selected=null;
+      if(pourStart){saved.water=state.pourStep?POUR[state.pourStep-1].total:0;saved.pourReady=false;saved.pourFailed=false;}
+      saved.objects.forEach(o=>{if(o.kind==='stroke')o.ended=-1000;if(o.kind==='element')o.createdAt=-1000;});
+      localStorage.setItem(DRAFT,JSON.stringify({state:saved,uid}));
+    }catch(e){if(!draftWarningShown){draftWarningShown=true;toast('草稿暂时无法保存，请先完成作品并保存图片。');}}
+  }
+  function scheduleDraft(){if(hasStarted&&!draftTimer)draftTimer=setTimeout(saveDraft,250);}
+  function restoreDraft(){
+    try{
+      const draft=JSON.parse(localStorage.getItem(DRAFT)||'null'),s=draft&&draft.state;
+      if(!s||!Number.isInteger(s.stage)||s.stage<0||s.stage>5||!Number.isInteger(s.maxStage)||s.maxStage<s.stage||s.maxStage>5||!BOWLS[s.bowl]||!TEAS[s.tea]||!Number.isInteger(s.pourStep)||!POUR[s.pourStep]||!Number.isFinite(s.whisk)||!Array.isArray(s.objects))return;
+      if(!s.objects.every(o=>o&&Number.isInteger(o.id)&&['element','text','stroke'].includes(o.kind)&&(o.kind!=='stroke'||Array.isArray(o.points))&&(o.kind!=='text'||typeof o.text==='string')))return;
+      const defaults=JSON.parse(initialState);Object.keys(defaults).forEach(k=>{if(typeof s[k]===typeof defaults[k])state[k]=s[k];});
+      state.selected=null;state.whisk=Math.max(0,Math.min(1000,state.whisk));
+      state.objects.forEach(o=>{if(o.kind==='stroke')o.ended=-1000;if(o.kind==='element')o.createdAt=-1000;});
+      uid=state.objects.reduce((n,o)=>Math.max(n,o.id+1),1);hasStarted=true;
+    }catch(e){}
+  }
+
+  function showLanding(){stopInteractions();document.body.classList.add('is-landing');document.body.classList.remove('is-editor');document.body.classList.remove('is-liquid');$('landing').hidden=false;$('experience').hidden=true;$('back-button').disabled=true;$('back-button').setAttribute('aria-label','返回上一步');$('start-label').textContent=sessionComplete?'再点一盏':hasStarted?'继续点茶':'点击开始';$('new-session').hidden=!hasStarted||sessionComplete;window.scrollTo(0,0);}
+  function enterExperience(){window.TeaSound.start();hasStarted=true;document.body.classList.remove('is-landing');$('landing').hidden=true;$('experience').hidden=false;render();$('experience').scrollTop=0;renderer.invalidate(true);window.scrollTo(0,0);scheduleDraft();}
   function syncViewport(){const vv=window.visualViewport;document.documentElement.style.setProperty('--modal-height',Math.round(vv?vv.height:innerHeight)+'px');document.documentElement.style.setProperty('--modal-offset',Math.round(vv?vv.offsetTop:0)+'px');if(/INPUT|TEXTAREA/.test(document.activeElement.tagName))return;document.documentElement.style.setProperty('--view-height',Math.round(window.visualViewport?window.visualViewport.height:window.innerHeight)+'px');const vh=window.innerHeight,vw=window.innerWidth;document.documentElement.style.setProperty('--legacy-bowl',Math.min(vw-40,Math.max(180,vh-(state.stage>=4?420:385)))+'px');document.documentElement.style.setProperty('--legacy-home',Math.min(vw-40,Math.max(175,vh-330))+'px');}
   const flexProbe=document.createElement('div');flexProbe.style.cssText='display:flex;flex-direction:column;row-gap:1px;position:absolute;visibility:hidden';flexProbe.appendChild(document.createElement('div'));flexProbe.appendChild(document.createElement('div'));document.body.appendChild(flexProbe);document.body.classList.toggle('no-flex-gap',flexProbe.scrollHeight!==1);flexProbe.remove();document.body.classList.toggle('legacy-layout',!window.CSS||!CSS.supports('aspect-ratio','1'));syncViewport();window.addEventListener('resize',syncViewport);if(window.visualViewport)window.visualViewport.addEventListener('resize',syncViewport);
   document.addEventListener('focusin',e=>{if(/INPUT|TEXTAREA/.test(e.target.tagName))document.body.classList.add('editing-field');});document.addEventListener('focusout',()=>{document.body.classList.remove('editing-field');setTimeout(syncViewport,200);});
@@ -42,9 +67,9 @@
   }
   function updateCount(){$('collection-count').textContent=collection.length;$('collection-count').hidden=!collection.length;}
   function snapshot(){history.push(JSON.stringify(state.objects));if(history.length>10)history.shift();}
-  function changed(){generated=null;renderer.invalidate(true);const undo=$('undo-button');if(undo)undo.disabled=!history.length;}
+  function changed(){generated=null;renderer.invalidate(true);const undo=$('undo-button');if(undo)undo.disabled=!history.length;scheduleDraft();}
   function currentObject(){return state.objects.find(o=>o.id===state.selected);}
-  function setStep(stage){stopInteractions();state.stage=stage;state.maxStage=Math.max(state.maxStage,stage);state.selected=null;state.panel=stage===4?'elements':'';state.mode=stage===4?'select':'brush';render();$('experience').scrollTop=0;renderer.invalidate(true);window.scrollTo(0,0);}
+  function setStep(stage){stopInteractions();state.stage=stage;state.maxStage=Math.max(state.maxStage,stage);state.selected=null;state.panel=stage===4?'elements':'';state.mode=stage===4?'select':'brush';render();$('experience').scrollTop=0;renderer.invalidate(true);window.scrollTo(0,0);scheduleDraft();}
   function render(){
     syncViewport();const step=STEPS[state.stage];$('experience').dataset.stage=state.stage;document.body.classList.toggle('is-editor',state.stage===4||state.stage===5);document.body.classList.toggle('is-liquid',state.stage===2||state.stage===3);$('step-number').textContent=NUMERALS[state.stage];$('step-category').textContent=step.category;$('step-title').textContent=step.title;$('step-subtitle').textContent=step.subtitle;$('next-label').textContent=step.next;$('literature-quote').textContent=step.quote;$('literature-source').textContent=step.source;$('literature-quote').title=step.explain;$('back-button').disabled=false;$('previous-button').hidden=false;$('previous-button').querySelector('span').textContent=state.stage===0?'返回首页':state.stage===2&&state.pourStep>0?'返回上一段':'上一步';
     $('step-nav').innerHTML=STEPS.map((s,i)=>`<button class="step-dot ${i===state.stage?'active':i<state.maxStage?'complete':''}" data-step="${i}" ${i>state.maxStage?'disabled':''} aria-label="${NUMERALS[i]} · ${s.category}" ${i===state.stage?'aria-current="step"':''}>${s.category.replace(/ /g,'')}</button>`).join('');
@@ -52,23 +77,23 @@
     $('kettle').hidden=state.stage!==2;$('whisk').hidden=state.stage!==3||state.whisk>=1000;$('canvas-hint').hidden=true;$('bowl-caption').hidden=state.stage>=2;
     const oldPreview=document.querySelector('.signature-preview');if(oldPreview)oldPreview.remove();
     if(state.stage<=1)renderChoices();
-    if(state.stage===2)renderPour();
+    if(state.stage===2){$('kettle').disabled=state.pourReady||state.pourFailed;renderPour();}
     if(state.stage===3)renderWhisk();
     if(state.stage===4)renderDrawing();
     if(state.stage===5)renderSignature();
-    updateNext();
+    updateNext();scheduleDraft();
   }
-  function updateNext(){const disabled=state.stage===2?!state.pourReady:state.stage===3?state.whisk<1000:false;$('next-button').disabled=disabled;if(state.stage===2)$('next-label').textContent=state.pourStep<2?['继续注汤','再添一汤'][state.pourStep]:'开始击拂';}
+  function updateNext(){$('back-button').setAttribute('aria-label',state.stage===0?'返回首页':state.stage===2&&state.pourStep>0?'返回上一段':'返回上一步');const disabled=state.stage===2?!state.pourReady:state.stage===3?state.whisk<1000:false;$('next-button').disabled=disabled;if(state.stage===2)$('next-label').textContent=state.pourStep<2?['继续注汤','再添一汤'][state.pourStep]:'开始击拂';}
   function renderChoices(){const data=state.stage===0?BOWLS:TEAS,key=state.stage===0?'bowl':'tea';$('controls').innerHTML=`<div class="choices">${data.map((v,i)=>`<button class="choice ${state[key]===i?'selected':''}" data-choice="${i}" aria-pressed="${state[key]===i}"><canvas id="choice-${i}" aria-hidden="true"></canvas><span class="choice-name">${v.name}</span><small>${v.note}</small></button>`).join('')}</div><p class="selection-description" aria-live="polite">${data[state[key]].description}</p>`;data.forEach((_,i)=>renderer.thumbnail($(`choice-${i}`),i,key));}
   function renderPour(){$('kettle').querySelector('span').textContent=state.pourReady?'本汤已完成':state.pourFailed?'请重试这一汤':'长按注水 · 松手停止';const p=POUR[state.pourStep],max=p.max+700;$('controls').innerHTML=`<div class="pour-steps">${POUR.map((p,i)=>`<span class="pour-step ${i===state.pourStep?'active':i<state.pourStep?'done':''}"><b>${i<state.pourStep?'✓':['一','二','三'][i]}</b>${['调膏','续汤','添汤'][i]}</span>`).join('')}</div><div class="meter"><span class="meter-target" style="left:${p.min/max*100}%;width:${(p.max-p.min)/max*100}%"></span><span class="meter-fill" id="pour-fill"></span></div><div class="meter-labels"><span>${p.text}</span><span>${p.min/1000}–${p.max/1000} 秒</span></div><p class="action-hint" id="pour-hint">${state.pourReady?'水量正好，茶已舒展。':state.pourFailed?'再来一次，从这汤继续。':p.help}${state.pourReady||state.pourFailed?' <button class="text-button" id="retry-pour">重试这一汤</button>':''}</p>`;if(state.pourReady)$('pour-fill').style.width=((p.min+p.max)/2/max*100)+'%';}
   function updateStream(){const svg=$('kettle').querySelector('svg'),m=svg.getScreenCTM();if(!m)return;const pt=svg.createSVGPoint();pt.x=12;pt.y=62;const tip=pt.matrixTransform(m),rect=$('tea-stage').getBoundingClientRect(),x=(tip.x-rect.left)/rect.width*600,y=(tip.y-rect.top)/rect.height*600,paths=$('water-stream').querySelectorAll('path');paths[0].setAttribute('d',`M${x-6} ${y}C${x-11} ${y+35} 286 248 304 292L307 292C290 245 ${x-1} ${y+35} ${x+6} ${y}Z`);paths[0].setAttribute('fill','#dfeae0');paths[0].setAttribute('fill-opacity','.85');paths[0].setAttribute('stroke-width','0');paths[1].setAttribute('d',`M${x} ${y}C${x-4} ${y+35} 288 246 305 292`);}
   function pourFrame(now){if(!pourStart)return;const elapsed=Math.max(0,now-pourStart-150),p=POUR[state.pourStep],base=state.pourStep?POUR[state.pourStep-1].total:0;pourAmount=elapsed;state.water=Math.min(.54,base+(p.total-base)*elapsed/((p.min+p.max)/2));$('pour-fill').style.width=Math.min(100,elapsed/(p.max+700)*100)+'%';$('pour-fill').style.background=elapsed>p.max?'#b27d5f':'var(--olive)';updateStream();if(elapsed>100&&Math.floor(elapsed/140)!==Math.floor((elapsed-17)/140))renderer.ripple();renderer.invalidate();if(elapsed>p.max)$('pour-hint').textContent='水稍多了，松手后可以重试这一汤。';pourRAF=requestAnimationFrame(pourFrame);}
   function startPour(event){if(state.stage!==2||state.pourReady||state.pourFailed||pourStart)return;event.preventDefault();pourPointer=event.pointerId;$('kettle').setPointerCapture(event.pointerId);pourStart=performance.now();window.TeaSound.pour();pourAmount=0;$('kettle').classList.add('pouring');setTimeout(()=>{if(pourStart)$('water-stream').removeAttribute('hidden');},180);pourRAF=requestAnimationFrame(pourFrame);}
-  function endPour(){window.TeaSound.stop();if(!pourStart)return;const p=POUR[state.pourStep];pourAmount=Math.max(0,performance.now()-pourStart-150);pourStart=0;pourPointer=null;cancelAnimationFrame(pourRAF);$('kettle').classList.remove('pouring');$('water-stream').setAttribute('hidden','');const success=pourAmount>=p.min&&pourAmount<=p.max;state.pourReady=success;state.pourFailed=!success;if(success){state.water=p.total;toast(p.text);renderPour();}else{$('pour-hint').innerHTML=`${pourAmount<p.min?'水量稍少，还可以再添得从容些。':'水量稍多，无妨，再试这一汤。'} <button class="text-button" id="retry-pour">重试这一汤</button>`;}$('kettle').querySelector('span').textContent=state.pourReady?'本汤已完成':state.pourFailed?'请重试这一汤':'长按注水 · 松手停止';$('kettle').disabled=state.pourReady||state.pourFailed;updateNext();renderer.invalidate();}
-  function resetPour(){state.pourReady=false;state.pourFailed=false;state.water=state.pourStep?POUR[state.pourStep-1].total:0;$('kettle').disabled=false;renderPour();updateNext();renderer.invalidate();}
+  function endPour(){window.TeaSound.stop();if(!pourStart)return;const p=POUR[state.pourStep];pourAmount=Math.max(0,performance.now()-pourStart-150);pourStart=0;pourPointer=null;cancelAnimationFrame(pourRAF);$('kettle').classList.remove('pouring');$('water-stream').setAttribute('hidden','');const success=pourAmount>=p.min&&pourAmount<=p.max;state.pourReady=success;state.pourFailed=!success;if(success){state.water=p.total;toast(p.text);renderPour();}else{$('pour-hint').innerHTML=`${pourAmount<p.min?'水量稍少，还可以再添得从容些。':'水量稍多，无妨，再试这一汤。'} <button class="text-button" id="retry-pour">重试这一汤</button>`;}$('kettle').querySelector('span').textContent=state.pourReady?'本汤已完成':state.pourFailed?'请重试这一汤':'长按注水 · 松手停止';$('kettle').disabled=state.pourReady||state.pourFailed;updateNext();renderer.invalidate();scheduleDraft();}
+  function resetPour(){state.pourReady=false;state.pourFailed=false;state.water=state.pourStep?POUR[state.pourStep-1].total:0;$('kettle').disabled=false;renderPour();updateNext();renderer.invalidate();scheduleDraft();}
   function whiskText(){return state.whisk>=1000?'沫厚如云，可以作画':state.whisk>=900?'雪沫乳花，浮于盏面':state.whisk>=600?'沫如珠玑，磊落可观':state.whisk>=300?'沫渐起，如疏星淡月':'一来一回，茶沫渐生';}
   function renderWhisk(){$('controls').innerHTML=`<p class="whisk-caption" id="whisk-text">${whiskText()}</p><div class="meter"><span class="meter-fill" id="whisk-fill" style="width:${state.whisk/10}%"></span></div><div class="meter-labels"><span>汤 花</span><span class="whisk-count" id="whisk-count">${Math.floor(state.whisk/10)}%</span></div><p class="action-hint">${state.whisk>=1000?'这一盏雪，等你落笔。':'在茶面快速来回滑动，也可以连续轻点。'}</p>`;}
-  function addWhisk(count,x,y){if(state.whisk>=1000)return;window.TeaSound.whisk();state.whisk=Math.min(1000,state.whisk+count);$('whisk-fill').style.width=state.whisk/10+'%';$('whisk-count').textContent=Math.floor(state.whisk/10)+'%';$('whisk-text').textContent=whiskText();if(!renderer.lastWhiskRipple||performance.now()-renderer.lastWhiskRipple>100){renderer.lastWhiskRipple=performance.now();renderer.ripple(x,y);}if(state.whisk>=1000){$('whisk').hidden=true;renderWhisk();toast('沫厚如云，可以作画');updateNext();}renderer.invalidate();}
+  function addWhisk(count,x,y){if(state.whisk>=1000)return;window.TeaSound.whisk();state.whisk=Math.min(1000,state.whisk+count);$('whisk-fill').style.width=state.whisk/10+'%';$('whisk-count').textContent=Math.floor(state.whisk/10)+'%';$('whisk-text').textContent=whiskText();if(!renderer.lastWhiskRipple||performance.now()-renderer.lastWhiskRipple>100){renderer.lastWhiskRipple=performance.now();renderer.ripple(x,y);}if(state.whisk>=1000){$('whisk').hidden=true;renderWhisk();toast('沫厚如云，可以作画');updateNext();}renderer.invalidate();scheduleDraft();}
   const COLORS=[['#745235','茶褐'],['#45483f','松烟'],['#737e60','苔青'],['#9b725c','赭石'],['#ab8182','胭脂']];
   const GROUPS={'萌宠':['团团熊猫','墨熊猫','花狸','垂耳犬','闻草兔','趴趴猫','探头狗','熊猫','猫咪','小兔','小狗','海豹','小鸟'],'点缀':['蝶','蜻蜓','落瓣','月','星星','云'],'花草':['清竹','花枝','芳草','竹','折枝','花叶','玫瑰','雏菊','清荷','团叶','落瓣','梅','兰','蝶'],'水景':['锦鲤','水草','游鱼','轻舟','水纹','远岸','芦苇','山','月','云','松','瀑','石']};
   const LABELS={'蝶':'蝴蝶','落瓣':'落花','月':'一弯月','星星':'小星点','云':'云纹','墨熊猫':'熊猫抱抱','花狸':'小猫探花','垂耳犬':'小狗抱抱','闻草兔':'小兔闻草','趴趴猫':'小猫趴着','探头狗':'小狗探头','清荷':'荷花','团叶':'荷叶','折枝':'花枝','花叶':'花叶','轻舟':'小舟'};
@@ -144,7 +169,7 @@
       event.preventDefault();lastTap=null;const pts=[...pointers.values()],o=currentObject();beginEdit();gesture={distance:Math.hypot(pts[1].x-pts[0].x,pts[1].y-pts[0].y),scale:o.scale||1,id:o.id};pointer=null;return;
     }
     if(pointers.size>1)return;
-    if(state.stage===3){event.preventDefault();pointer={id:event.pointerId,kind:'whisk',last:p};addWhisk(1,p.x,p.y);moveWhisk(p);return;}
+    if(state.stage===3){event.preventDefault();pointer={id:event.pointerId,kind:'whisk',last:p};addWhisk(WHISK_TAP,p.x,p.y);moveWhisk(p);return;}
     if(state.mode!=='brush'){
       const hits=hitObjects(p),activeHit=selected&&hits.some(o=>o.id===selected.id);const o=handle||activeHit?selected:hits[0];if(!o){pointer={id:event.pointerId,kind:'blank',start:p,moved:false};return;}
       event.preventDefault();beginEdit();state.selected=o.id;
@@ -241,9 +266,10 @@
 
   $('next-button').onclick=()=>{if($('next-button').disabled)return;if(state.stage===2&&state.pourStep<2){state.pourStep++;resetPour();$('previous-button').querySelector('span').textContent='返回上一段';return;}if(state.stage===4){setStep(5);return;}if(state.stage===5){createCard();return;}setStep(state.stage+1);};
   function previousStep(){if(state.stage===2&&state.pourStep>0){stopInteractions();state.pourStep--;state.water=POUR[state.pourStep].total;state.pourReady=true;state.pourFailed=false;$('kettle').disabled=true;render();renderer.invalidate();return;}if(state.stage>0)setStep(state.stage-1);else showLanding();}
-  $('back-button').onclick=showLanding;$('previous-button').onclick=previousStep;
+  $('back-button').onclick=previousStep;$('previous-button').onclick=previousStep;
+  $('home-link').setAttribute('aria-label','返回首页');$('home-link').title='返回首页';
   $('home-link').onclick=e=>{e.preventDefault();showLanding();};
-  function newSession(){stopInteractions();Object.keys(state).forEach(k=>delete state[k]);Object.assign(state,JSON.parse(initialState));history.length=0;uid=1;pointer=null;gesture=null;pointers.clear();whiskRemainder=0;transformUndo=false;generated=null;sessionComplete=false;renderer.ripples=[];renderer.lastWhiskRipple=0;try{localStorage.removeItem('tea-art-draft-v1');}catch(e){}$('kettle').disabled=false;renderer.invalidate(true);enterExperience();}
+  function newSession(){stopInteractions();Object.keys(state).forEach(k=>delete state[k]);Object.assign(state,JSON.parse(initialState));history.length=0;uid=1;pointer=null;gesture=null;pointers.clear();whiskRemainder=0;transformUndo=false;generated=null;sessionComplete=false;renderer.ripples=[];renderer.lastWhiskRipple=0;try{localStorage.removeItem(DRAFT);}catch(e){}$('kettle').disabled=false;renderer.invalidate(true);enterExperience();}
   $('start-button').onclick=()=>{if(sessionComplete)newSession();else enterExperience();};
   $('new-session').onclick=()=>confirmAction('再点一盏？','当前未收藏的创作会重新开始。茶戏匣中的作品保留。',newSession);
   $('collection-button').onclick=showCollection;$('close-modal').onclick=closeModal;
@@ -285,13 +311,16 @@
   $('tea-canvas').addEventListener('pointerdown',canvasDown);$('tea-canvas').addEventListener('pointermove',canvasMove);$('tea-canvas').addEventListener('pointerup',canvasUp);$('tea-canvas').addEventListener('pointercancel',canvasUp);$('tea-canvas').addEventListener('lostpointercapture',canvasUp);$('tea-canvas').addEventListener('contextmenu',e=>e.preventDefault());
   // Touch fallback for older WebViews; modern iOS/Android use unified Pointer Events.
   if(!window.PointerEvent){for(const [el,start,move,end]of[[$('tea-canvas'),canvasDown,canvasMove,canvasUp],[$('kettle'),startPour,()=>{},endPour]]){el.setPointerCapture=()=>{};for(const [name,handler]of[['touchstart',start],['touchmove',move],['touchend',end],['touchcancel',end]]){el.addEventListener(name,e=>{if(el===$('tea-canvas')&&state.stage!==3&&state.stage!==4)return;e.preventDefault();for(const t of e.changedTouches)handler({type:name==='touchend'?'pointerup':name==='touchcancel'?'pointercancel':name,clientX:t.clientX,clientY:t.clientY,pointerId:t.identifier,pointerType:'touch',preventDefault:()=>{}});},{passive:false});}el.addEventListener('mousedown',e=>start({clientX:e.clientX,clientY:e.clientY,pointerId:1,pointerType:'mouse',button:e.button,preventDefault:()=>e.preventDefault()}));window.addEventListener('mousemove',e=>move({clientX:e.clientX,clientY:e.clientY,pointerId:1,preventDefault:()=>{}}));window.addEventListener('mouseup',e=>end({type:'pointerup',clientX:e.clientX,clientY:e.clientY,pointerId:1}));}}
-  $('tea-canvas').addEventListener('keydown',e=>{if(state.stage===3&&(e.key===' '||e.key==='Enter')){e.preventDefault();addWhisk(1,300,294);}});
+  $('tea-canvas').addEventListener('keydown',e=>{if(state.stage===3&&(e.key===' '||e.key==='Enter')){e.preventDefault();addWhisk(WHISK_TAP,300,294);}});
   window.addEventListener('blur',stopInteractions);document.addEventListener('visibilitychange',()=>{if(document.hidden)stopInteractions();});
   document.addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.key==='z'&&state.stage===4&&!/INPUT|TEXTAREA/.test(document.activeElement.tagName)&&!$('modal').open){e.preventDefault();$('undo-button').click();}});
   if(document.fonts)document.fonts.ready.then(()=>renderer.invalidate(true));
   function updateSoundButtons(){const b=$('sound-music');b.setAttribute('aria-pressed',String(window.TeaSound.prefs.music||window.TeaSound.prefs.effects));b.setAttribute('aria-label',b.getAttribute('aria-pressed')==='true'?'音乐与音效已开启，点击静音':'音乐与音效已静音，点击开启');}
   $('sound-music').onclick=()=>{const enabled=window.TeaSound.prefs.music||window.TeaSound.prefs.effects;['music','effects'].forEach(kind=>{if(window.TeaSound.prefs[kind]===enabled)window.TeaSound.toggle(kind);});updateSoundButtons();};updateSoundButtons();
   document.addEventListener('click',e=>{if(e.target.closest('button')&&!e.target.closest('[id^="sound-"]'))window.TeaSound.click();});
-  try{const draft=JSON.parse(localStorage.getItem('tea-art-draft-v1')||'null');if(draft&&draft.state&&Array.isArray(draft.state.objects)&&draft.state.stage>=0&&draft.state.stage<=5){Object.assign(state,draft.state);uid=Number(draft.uid)||1;hasStarted=true;localStorage.removeItem('tea-art-draft-v1');}}catch(e){}
+  restoreDraft();
+  ['click','input','change'].forEach(type=>document.addEventListener(type,scheduleDraft));
+  window.addEventListener('pagehide',saveDraft);
+  document.addEventListener('visibilitychange',()=>{if(document.hidden)saveDraft();});
   collectionReady=loadCollection();showLanding();requestAnimationFrame(dwellFrame);
 })();
